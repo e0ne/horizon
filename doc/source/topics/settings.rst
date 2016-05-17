@@ -498,6 +498,19 @@ the GUI. For example themes, see: /horizon/openstack_dashboard/themes/
 Horizon ships with two themes configured. 'default' is the default theme,
 and 'material' is based on Google's Material Design.
 
+``SELECTABLE_THEMES``
+---------------------
+
+.. versionadded:: 10.0.0(Newton)
+
+Default: ``AVAILABLE_THEMES``
+
+This setting tells Horizon which themes to expose to the user as selectable
+in the theme picker widget.  This value defaults to all themes configured
+in ``AVAILABLE_THEMES``, but a brander may wish to simply inherit from an
+existing theme and not allow that parent theme to be selected by the user.
+``SELECTABLE_THEMES`` takes the exact same format as ``AVAILABLE_THEMES``.
+
 ``DEFAULT_THEME``
 -----------------
 
@@ -509,7 +522,10 @@ This setting tells Horizon which theme to use if the user has not
 yet selected a theme through the theme picker and therefore set the
 cookie value. This value represents the ``theme_name`` key that is
 used from ``AVAILABLE_THEMES``.  To use this setting, the theme must
-also be configured inside of ``AVAILABLE_THEMES``.
+also be configured inside of ``AVAILABLE_THEMES``.  Your default theme
+must be configured as part of ``SELECTABLE_THEMES``.  If it is not, then
+your ``DEFAULT_THEME`` will default to the first theme in
+``SELECTABLE_THEMES``.
 
 ``THEME_COLLECTION_DIR``
 ------------------------
