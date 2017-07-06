@@ -14,6 +14,8 @@ from collections import defaultdict
 import itertools
 import logging
 
+import futurist
+
 from django.utils.translation import ugettext_lazy as _
 
 from horizon import exceptions
@@ -151,22 +153,36 @@ def _get_quota_data(request, tenant_mode=True, disabled_quotas=None,
 
     qs = base.QuotaSet()
 
-    if NOVA_QUOTA_FIELDS - disabled_quotas:
-        if tenant_mode:
-            quotasets.append(nova.tenant_quota_get(request, tenant_id))
-        else:
-            quotasets.append(nova.default_quota_get(request, tenant_id))
+    # it makes to have an opportunity to divide calls into different threads
+    # and not to have common resourse
+    volume_qs = []
+    compute_qs = []
 
-    if CINDER_QUOTA_FIELDS - disabled_quotas:
+    def _task_get_compute_quotasets():
+        if tenant_mode:
+            compute_qs.append(nova.tenant_quota_get(request, tenant_id))
+        else:
+            compute_qs.append(nova.default_quota_get(request, tenant_id))
+
+    def _task_get_volume_quotasets():
         try:
             if tenant_mode:
-                quotasets.append(cinder.tenant_quota_get(request, tenant_id))
+                volume_qs.append(cinder.tenant_quota_get(request, tenant_id))
             else:
-                quotasets.append(cinder.default_quota_get(request, tenant_id))
+                volume_qs.append(cinder.default_quota_get(request, tenant_id))
         except cinder.cinder_exception.ClientException:
             disabled_quotas.update(CINDER_QUOTA_FIELDS)
             msg = _("Unable to retrieve volume limit information.")
             exceptions.handle(request, msg)
+
+    with futurist.ThreadPoolExecutor(max_workers=2) as e:
+        if NOVA_QUOTA_FIELDS - disabled_quotas:
+            e.submit(fn=_task_get_compute_quotasets)
+        if CINDER_QUOTA_FIELDS - disabled_quotas:
+            e.submit(fn=_task_get_volume_quotasets)
+
+    quotasets += volume_qs
+    quotasets += compute_qs
 
     for quota in itertools.chain(*quotasets):
         if quota.name not in disabled_quotas:
@@ -176,6 +192,9 @@ def _get_quota_data(request, tenant_mode=True, disabled_quotas=None,
 
 @profiler.trace
 def get_default_quota_data(request, disabled_quotas=None, tenant_id=None):
+    if disabled_quotas is None:
+        disabled_quotas = get_disabled_quotas(request)
+
     return _get_quota_data(request,
                            tenant_mode=False,
                            disabled_quotas=disabled_quotas,
@@ -221,32 +240,18 @@ def get_tenant_quota_data(request, disabled_quotas=None, tenant_id=None):
             sec_quota = neutron_quotas.get('security_group').limit
             qs.add(base.QuotaSet({'security_groups': sec_quota}))
 
-    if 'network' in disabled_quotas:
-        for item in qs.items:
-            if item.name == 'networks':
-                qs.items.remove(item)
-                break
-    else:
-        net_quota = neutron_quotas.get('network').limit
-        qs.add(base.QuotaSet({'networks': net_quota}))
+    quotas_list = ['network', 'subnet', 'router']
 
-    if 'subnet' in disabled_quotas:
-        for item in qs.items:
-            if item.name == 'subnets':
-                qs.items.remove(item)
-                break
-    else:
-        net_quota = neutron_quotas.get('subnet').limit
-        qs.add(base.QuotaSet({'subnets': net_quota}))
-
-    if 'router' in disabled_quotas:
-        for item in qs.items:
-            if item.name == 'routers':
-                qs.items.remove(item)
-                break
-    else:
-        router_quota = neutron_quotas.get('router').limit
-        qs.add(base.QuotaSet({'routers': router_quota}))
+    for quota in quotas_list:
+        item_name = quota + 's'
+        if quota in disabled_quotas:
+            for item in qs.items:
+                if item.name == item_name:
+                    qs.items.remove(item)
+                    break
+        else:
+            net_quota = neutron_quotas.get(quota).limit
+            qs.add(base.QuotaSet({item_name: net_quota}))
 
     return qs
 
@@ -477,19 +482,56 @@ def tenant_limit_usages(request):
     # ProjectUsage/BaseUsage maybe used instead on volume/image dashboards.
     limits = {}
 
-    try:
-        if base.is_service_enabled(request, 'compute'):
-            limits.update(nova.tenant_absolute_limits(request, reserved=True))
-    except Exception:
-        msg = _("Unable to retrieve compute limit information.")
-        exceptions.handle(request, msg)
+    nova_limits = {}
+    cinder_limits = {}
+    volumes = []
+    snapshots = []
 
-    if cinder.is_volume_service_enabled(request):
+    is_volume_service = cinder.is_volume_service_enabled(request)
+
+    def _get_nova_tenant_absolute_limits():
+        try:
+            if base.is_service_enabled(request, 'compute'):
+                nova_limits.update(nova.tenant_absolute_limits(request,
+                                                               reserved=True))
+        except Exception:
+            msg = _("Unable to retrieve compute limit information.")
+            exceptions.handle(request, msg)
+
+    def _get_cinder_tenant_absolute_limits():
+        try:
+            cinder_limits.update(cinder.tenant_absolute_limits(request))
+        except cinder.cinder_exception.ClientException:
+            msg = _("Unable to retrieve cinder tenant absolute limits"
+                    "information.")
+            exceptions.handle(request, msg)
+
+    def _get_cinder_volumes():
         try:
             limits.update(cinder.tenant_absolute_limits(request))
+            volumes.extend(cinder.volume_list(request))
         except cinder.cinder_exception.ClientException:
             msg = _("Unable to retrieve volume limit information.")
             exceptions.handle(request, msg)
+
+    def _get_cinder_volume_snapshots():
+        try:
+            snapshots.extend(cinder.volume_snapshot_list(request))
+        except cinder.cinder_exception.ClientException:
+            msg = _("Unable to retrieve volume limit information.")
+            exceptions.handle(request, msg)
+
+    with futurist.ThreadPoolExecutor(max_workers=4) as e:
+        e.submit(fn=_get_nova_tenant_absolute_limits)
+
+        if is_volume_service:
+            e.submit(fn=_get_cinder_tenant_absolute_limits)
+            e.submit(fn=_get_cinder_volumes)
+            e.submit(fn=_get_cinder_volume_snapshots)
+
+    limits.update(nova_limits)
+    # if cinder_limits is still empty, nothing will happen
+    limits.update(cinder_limits)
 
     return limits
 
