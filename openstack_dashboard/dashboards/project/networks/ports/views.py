@@ -12,6 +12,7 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import futurist
 from django.core.urlresolvers import reverse
 from django.utils.translation import ugettext_lazy as _
 
@@ -108,7 +109,7 @@ class DetailView(tabs.TabbedTableView):
         return port
 
     @memoized.memoized_method
-    def get_network(self, network_id):
+    def wget_network(self, network_id):
         try:
             network = api.neutron.network_get(self.request, network_id)
         except Exception:
@@ -119,7 +120,7 @@ class DetailView(tabs.TabbedTableView):
         return network
 
     @memoized.memoized_method
-    def get_security_groups(self, sg_ids):
+    def wget_security_groups(self, sg_ids):
         # Avoid extra API calls if no security group is associated.
         if not sg_ids:
             return []
@@ -134,15 +135,58 @@ class DetailView(tabs.TabbedTableView):
 
     def get_context_data(self, **kwargs):
         context = super(DetailView, self).get_context_data(**kwargs)
+#        import rpdb;rpdb.set_trace()
         port = self.get_data()
         network_url = "horizon:project:networks:detail"
         subnet_url = "horizon:project:networks:subnets:detail"
-        network = self.get_network(port.network_id)
+
+        network = {}
+        @memoized.memoized_method
+        def _get_network(network_id):
+            try:
+#                import rpdb;rpdb.set_trace()
+                nn = api.neutron.network_get(self.request, network_id)
+#                import rpdb;rpdb.set_trace()
+                return nn
+            except Exception as ee:
+#                import rpdb;rpdb.set_trace()
+#                raise
+                network = {}
+                msg = _('Unable to retrieve network details.')
+                exceptions.handle(self.request, msg)
+
+            return network
+
+        @memoized.memoized_method
+        def _get_security_groups(sg_ids):
+            # Avoid extra API calls if no security group is associated.
+            if not sg_ids:
+                return []
+            try:
+                security_groups = api.neutron.security_group_list(self.request,
+                                                                  id=sg_ids)
+            except Exception:
+                security_groups = []
+                msg = _("Unable to retrieve security groups for the port.")
+                exceptions.handle(self.request, msg)
+            port.security_groups = security_groups
+
+#        network = self.get_network(port.network_id)
+#        port.security_groups = self.get_security_groups(port.security_groups)
+
+        with futurist.ThreadPoolExecutor(max_workers=2) as e:
+#            import rpdb;rpdb.set_trace()
+            fut = e.submit(fn=_get_network, network_id=port.network_id)
+            e.submit(fn=_get_security_groups, sg_ids=port.security_groups)
+            #import rpdb;rpdb.set_trace()
+            network = fut.result()
+
         port.network_name = network.get('name')
         port.network_url = reverse(network_url, args=[port.network_id])
+
         for ip in port.fixed_ips:
             ip['subnet_url'] = reverse(subnet_url, args=[ip['subnet_id']])
-        port.security_groups = self.get_security_groups(port.security_groups)
+#        port.security_groups = self.get_security_groups(port.security_groups)
         table = project_tables.PortsTable(self.request,
                                           network_id=port.network_id)
         # TODO(robcresswell) Add URL for "Ports" crumb after bug/1416838
