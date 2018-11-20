@@ -236,6 +236,14 @@ BASE_XSTATIC_MODULES = [
     # testing only, not included in application
     ('xstatic.pkg.jasmine', []),
     ('xstatic.pkg.termjs', []),
+
+    # temporary for vitrage test
+#    ('xstatic.pkg.dagre', ['dagre.core.js']),
+#    ('xstatic.pkg.dagre_d3', ['dagre-d3.core.js']),
+#    ('xstatic.pkg.graphlib', ['graphlib.core.js']),
+#    ('xstatic.pkg.lodash', ['lodash.js']),
+#    ('xstatic.pkg.moment', ['moment.js']),
+#    ('xstatic.pkg.moment_timezone', ['moment-timezone-with-data-2012-2022.js']),
 ]
 
 
